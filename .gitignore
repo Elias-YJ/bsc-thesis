@@ -1,3 +1,7 @@
-*.csv
+# Data
+data/*.csv
+
+# Local cache
 .DS_Store
+.idea
 .ipynb_checkpoints
