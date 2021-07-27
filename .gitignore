@@ -5,3 +5,4 @@ data/*.csv
 .DS_Store
 .idea
 .ipynb_checkpoints
+__pycache__
