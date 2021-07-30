@@ -2,6 +2,7 @@ from prophet import Prophet
 import logging
 
 logger = logging.getLogger('prophet')
+logger.setLevel(logging.WARNING)
 
 
 class ReferenceModel(Prophet):
@@ -26,8 +27,9 @@ class ReferenceModel(Prophet):
         super().add_seasonality(name, period, fourier_order, prior_scale,
                                 **kwargs)
 
-    def projection_model(self, regressors=[]):
-        proj = Prophet(changepoint_prior_scale=0.01, holidays=self.holidays)
+    def projection_model(self, regressors=[], mcmc_samples=100):
+        proj = Prophet(changepoint_prior_scale=0.01, holidays=self.holidays,
+                       mcmc_samples=mcmc_samples)
         regressors = [variable for variable in self.variables if
                       variable['name'] in regressors]
 
@@ -39,9 +41,9 @@ class ReferenceModel(Prophet):
 
         return proj
 
-    def project(self, future, regressors):
+    def project(self, future, regressors, proj_samples=0):
         future = future.copy()
-        submodel = self.projection_model(regressors)
+        submodel = self.projection_model(regressors, mcmc_samples=proj_samples)
         try:
             self.fit(future)
         except Exception:
@@ -54,6 +56,3 @@ class ReferenceModel(Prophet):
         submodel.fit(future)
         projection = submodel.predict(future)
         return projection, submodel
-
-
-
