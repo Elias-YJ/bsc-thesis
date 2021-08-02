@@ -1,0 +1,8 @@
+numpy
+pandas
+seaborn
+scikit-learn
+prophet
+pytest
+pytest-sugar
+nbval
