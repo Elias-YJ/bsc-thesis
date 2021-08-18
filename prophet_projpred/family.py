@@ -16,6 +16,10 @@ class Family(ABC):
     def loglik(self, y, yhat, dis):
         pass
 
+    @abstractmethod
+    def interval(self, yhat, dis, alpha):
+        pass
+
 
 class Gaussian(Family):
     def kl(self, ref, sub, weights=1):
@@ -38,3 +42,14 @@ class Gaussian(Family):
         :return: NxS log likelohood matrix
         """
         return norm.logpdf(y, loc=yhat, scale=dis)
+
+    def interval(self, yhat, dis, alpha):
+        """Return the upper and lower bounds of the confidence interval at
+        confidence level alpha
+
+        :param yhat: Nx1 vector
+        :param dis: float
+        :param alpha: float, within [0,1]
+        :return:
+        """
+        return norm.interval(alpha, loc=yhat, scale=dis)

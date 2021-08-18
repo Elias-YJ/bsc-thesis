@@ -5,9 +5,12 @@ from . import stats
 import logging
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 
 logger = logging.getLogger('prophet')
 logger.setLevel(logging.WARNING)
+
+logging.getLogger("pystan").propagate = False
 
 
 class ReferenceModel(Prophet):
@@ -33,9 +36,59 @@ class ReferenceModel(Prophet):
         super().add_seasonality(name, period, fourier_order, prior_scale,
                                 **kwargs)
 
-    def projection_model(self, regressors):
+    def generate_submodels(self, path, train, future,
+                           ndraws_pred=20, iter=1e4):
+        """Convenience function for creating the submodels that are suggested
+        by the search.
+
+        :param path: list
+        :param train: pd.DataFrame
+        :param future: pd.DataFrame
+        :param ndraws_pred: int
+        :return:
+        """
+
+        pred_fig = plt.figure(facecolor='w', figsize=(14, 6))
+        pred_ax = pred_fig.add_subplot(111)
+
+        statistics_table = pd.DataFrame(columns=['elpd', 'mape', 'kl'])
+        for var_list in path:
+            projections, statistics = self.project(
+                train, future, var_list, ndraws=ndraws_pred, iter=iter)
+            yhat = projections['yhat'].mean(axis=1)
+            sigma = projections['sigma_obs'].loc[0, :].mean()
+            yhat_upper, yhat_lower = self.family.interval(
+                yhat, sigma, self.interval_width)
+            proj_prediction = pd.DataFrame(
+                data={'yhat': yhat,
+                      'yhat_upper': yhat_upper,
+                      'yhat_lower': yhat_lower,
+                      'ds': future['ds'].values},
+                index=future.index
+            )
+            pred_ax.plot(proj_prediction['ds'].values,
+                         proj_prediction['yhat'],
+                         label=len(var_list),
+                         ls='-')
+            stat_row = pd.DataFrame(statistics, index=[len(var_list)])
+            statistics_table = statistics_table.append(
+                stat_row, ignore_index=True)
+
+        pred_ax.plot(future['ds'].values, future['y'], 'r.', label="Test data")
+        pred_ax.plot(future['ds'].values,
+                     self.predictive_samples_mean(future)['yhat'],
+                     label="Reference model",
+                     ls='-')
+        pred_ax.legend()
+        pred_ax.set_ylabel('y')
+        pred_ax.set_xlabel('ds')
+        pred_ax.set_xlim([pd.to_datetime('2017-03-01'), future['ds'].tail(1)])
+        return statistics_table
+
+    def init_submodel(self, regressors):
         proj = Prophet(changepoint_prior_scale=self.changepoint_prior_scale,
-                       holidays=self.holidays)
+                       holidays=self.holidays,
+                       n_changepoints=self.n_changepoints)
         regressors = [variable for variable in self.variables if
                       variable['name'] in regressors]
 
@@ -48,7 +101,7 @@ class ReferenceModel(Prophet):
         return proj
 
     def project(self, train: pd.DataFrame, future: pd.DataFrame,
-                regressors, ndraws_pred=1):
+                regressors, ndraws=1, iter=1e4):
         """Project parameter draws to submodel space that is
         spanned by the given regressors. Uses mean values from reference space
         if only one draw is selected.
@@ -56,7 +109,8 @@ class ReferenceModel(Prophet):
         :param train: DataFrame
         :param future: DataFrame
         :param regressors: list
-        :param ndraws_pred: int
+        :param ndraws: int
+        :param iter: int
         :return: DataFrame, Prophet
         """
         try:
@@ -65,30 +119,55 @@ class ReferenceModel(Prophet):
             # Reference model is fitted. Proceed to projecting
             pass
 
-        if ndraws_pred > 1:
+        draw_indices = thinning(ndraws, self.uncertainty_samples)
+        if ndraws > 1:
             ref_pred_draws = self.predictive_samples(future)
+            yhat = ref_pred_draws['yhat'].iloc[:, draw_indices]
+            y = np.broadcast_to(
+                future['y'].values.reshape((len(future['y']), 1)),
+                yhat.shape
+            )
+            sigma_obs = ref_pred_draws['sigma_obs'].iloc[:, draw_indices].values
         else:
             ref_pred_draws = self.predictive_samples_mean(future)
-
-        draw_indices = thinning(ndraws_pred, self.uncertainty_samples)
+            yhat = ref_pred_draws['yhat'].iloc[:, 0:ndraws]
+            sigma_obs = self.stan_fit.extract()['sigma_obs'][0:ndraws]
+            y = future['y'].values
 
         # Project by fitting the submodel to reference model predictions
-        projections = pd.DataFrame(index=future.index)
-        for i in draw_indices:
+        projections = {'yhat': pd.DataFrame(index=future.index)}
+        for i in range(len(yhat.columns.values)):
             # Replace original data with reference model projections
-            y = ref_pred_draws['yhat'].iloc[:, i]
+            y_sub = yhat.iloc[:, i]
             submodel_train = train.copy()
-            submodel_train['y'] = y
+            submodel_train['y'] = y_sub
 
             # Initialize submodel and fit to reference model predictions
-            submodel = self.projection_model(regressors)
-            submodel.fit(submodel_train)
+            submodel = self.init_submodel(regressors)
+            submodel.fit(submodel_train, iter=iter)
 
             projection = submodel.predict(future).loc[:, ['yhat']]\
                 .rename(columns={'yhat': i})
-            projections = pd.concat([projections, projection],
-                                    ignore_index=True, axis=1)
-        return projections, submodel
+            projections['yhat'] = pd.concat(
+                [projections['yhat'], projection], ignore_index=True, axis=1)
+
+        dis = self.family.dispersion(
+            yhat.values, sigma_obs, projections['yhat'].values)
+        dis = np.broadcast_to(dis, yhat.shape)
+        projections['sigma_obs'] = pd.DataFrame(data=dis, index=future.index)
+
+        # Calculate projection statistics
+        test_indices = future.index.values > self.history.index.max()
+        loglik = self.family.loglik(y, projections['yhat'],
+                                    projections['sigma_obs'])
+
+        statistics = {'kl': self.family.kl(yhat.values,
+                                           projections['yhat'].values),
+                      'elpd': stats.elpd(loglik, test_indices=test_indices),
+                      'mape': stats.mape(y, projections['yhat'].values,
+                                         test_indices=test_indices)}
+
+        return projections, statistics
 
     def predictive_samples(self, df):
         samples = super().predictive_samples(df)
@@ -166,45 +245,23 @@ class ReferenceModel(Prophet):
         return sim_values
 
     def search(self, train: pd.DataFrame, future: pd.DataFrame,
-               ndraws_search=1, ndraws_pred=20):
-        predictions = self.predictive_samples(future)
-        yhat = predictions['yhat'].iloc[:, 0:ndraws_pred]
-        sigma_obs = predictions['sigma_obs'].iloc[:, 0:ndraws_pred]
-        y = np.broadcast_to(
-            future['y'].values.reshape((len(future['y']), 1)),
-            yhat.shape
-        )
+               ndraws_search=1):
+        """Search which variables should a submodel contain for all possible
+        submodel sizes.
 
-        added_variables = []
-        path = {}
-        while len(added_variables) < len(self.variables):
+        :param train:
+        :param future:
+        :param ndraws_search:
+        :return:
+        """
+
+        path = [[]]
+        while len(path[-1]) < len(self.variables):
             kl_table, variables = self.search_step(
-                train, future, added_variables, ndraws_search)
+                train, future, path[-1], ndraws_search)
             print(kl_table)
             # Add the variable which increases KL divergence the least
-            added_variables.append(kl_table.loc[0, 'variable'])
-
-            # Project draws from the reference to the previously selected
-            # submodel space and calculate mean predictions
-            proj_predictions, _ = self.project(
-                train, future, variables, ndraws_pred=ndraws_pred)
-
-            # Calculate projection statistics
-            test_indices = future.index.values > self.history.index.max()
-            mape = stats.mape(y, proj_predictions, test_indices=test_indices)
-
-            dis = self.family.dispersion(
-                yhat.values, sigma_obs.values, proj_predictions.values)
-            dis = np.broadcast_to(dis, yhat.shape)
-            loglik = self.family.loglik(y, proj_predictions, dis)
-            elpd = stats.elpd(loglik, test_indices=test_indices)
-
-            path[len(added_variables)] = {
-                'variables': variables,
-                'predictions': proj_predictions,
-                'mape': mape,
-                'elpd': elpd
-            }
+            path.append(variables)
         return path
 
     def search_step(self, train: pd.DataFrame, future: pd.DataFrame,
@@ -222,10 +279,11 @@ class ReferenceModel(Prophet):
                      if variable['name'] not in initial_variables]
         kl_divs = []
         for var in variables:
-            prediction, submodel = self.project(
-                train, future, initial_variables + [var], ndraws_search)
-            kl = self.family.kl(ref_pred['yhat'].values, prediction.values)
-            kl_divs.append(kl)
+            prediction, statistics = self.project(
+                train, future, initial_variables + [var], ndraws_search,
+                iter=1e4
+            )
+            kl_divs.append(statistics['kl'])
         result = pd.DataFrame(
             {'variable': variables, 'kl': kl_divs}
         ).sort_values(by='kl', ignore_index=True)
