@@ -28,4 +28,13 @@ class Gaussian(Family):
         return dis
 
     def loglik(self, y, yhat, dis):
-        return np.mean(norm.logpdf(y, loc=yhat, scale=dis), axis=0)
+        """Calculates the log likelihood matrix
+        Let N be the number of data points and S the number of draws
+
+        :param y: NxS matrix where the original Nx1 data is duplicated S times
+        :param yhat: NxS matrix of yhat posterior draws
+        :param dis: NxS matrix where the original 1xS dispersion parameters are
+        duplicated for each data point
+        :return: NxS log likelohood matrix
+        """
+        return norm.logpdf(y, loc=yhat, scale=dis)

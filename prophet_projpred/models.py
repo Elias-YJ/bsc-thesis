@@ -1,6 +1,7 @@
 from prophet import Prophet
 from .family import Gaussian
 from .util import thinning
+from . import stats
 import logging
 import pandas as pd
 import numpy as np
@@ -46,7 +47,8 @@ class ReferenceModel(Prophet):
 
         return proj
 
-    def project(self, train: pd.DataFrame, future: pd.DataFrame, regressors, ndraws_pred=1):
+    def project(self, train: pd.DataFrame, future: pd.DataFrame,
+                regressors, ndraws_pred=1):
         """Project parameter draws to submodel space that is
         spanned by the given regressors. Uses mean values from reference space
         if only one draw is selected.
@@ -189,16 +191,13 @@ class ReferenceModel(Prophet):
 
             # Calculate projection statistics
             test_indices = future.index.values > self.history.index.max()
-            mape = np.mean(
-                np.mean(np.abs((y - proj_predictions)/y), axis=1)[test_indices]
-            )
+            mape = stats.mape(y, proj_predictions, test_indices=test_indices)
 
             dis = self.family.dispersion(
                 yhat.values, sigma_obs.values, proj_predictions.values)
             dis = np.broadcast_to(dis, yhat.shape)
-            lppd = self.family.loglik(y, proj_predictions, dis)
-            ref_lppd = self.family.loglik(y, yhat, sigma_obs)
-            elpd = np.sum(ref_lppd-lppd)
+            loglik = self.family.loglik(y, proj_predictions, dis)
+            elpd = stats.elpd(loglik, test_indices=test_indices)
 
             path[len(added_variables)] = {
                 'variables': variables,
