@@ -36,8 +36,8 @@ class ReferenceModel(Prophet):
         super().add_seasonality(name, period, fourier_order, prior_scale,
                                 **kwargs)
 
-    def generate_submodels(self, path, train, future,
-                           ndraws_pred=20, iter=1e4):
+    def compute_submodels(self, path, train, future,
+                          ndraws_pred=20, iter=1e4):
         """Convenience function for creating the submodels that are suggested
         by the search.
 
@@ -47,43 +47,32 @@ class ReferenceModel(Prophet):
         :param ndraws_pred: int
         :return:
         """
-
-        pred_fig = plt.figure(facecolor='w', figsize=(14, 6))
-        pred_ax = pred_fig.add_subplot(111)
-
-        statistics_table = pd.DataFrame(columns=['elpd', 'mape', 'kl'])
+        submodels = {}
         for var_list in path:
             projections, statistics = self.project(
                 train, future, var_list, ndraws=ndraws_pred, iter=iter)
             yhat = projections['yhat'].mean(axis=1)
+            trend = projections['trend'].mean(axis=1)
             sigma = projections['sigma_obs'].loc[0, :].mean()
             yhat_upper, yhat_lower = self.family.interval(
                 yhat, sigma, self.interval_width)
+
             proj_prediction = pd.DataFrame(
                 data={'yhat': yhat,
                       'yhat_upper': yhat_upper,
                       'yhat_lower': yhat_lower,
+                      'trend': trend,
                       'ds': future['ds'].values},
                 index=future.index
             )
-            pred_ax.plot(proj_prediction['ds'].values,
-                         proj_prediction['yhat'],
-                         label=len(var_list),
-                         ls='-')
-            stat_row = pd.DataFrame(statistics, index=[len(var_list)])
-            statistics_table = statistics_table.append(
-                stat_row, ignore_index=True)
 
-        pred_ax.plot(future['ds'].values, future['y'], 'r.', label="Test data")
-        pred_ax.plot(future['ds'].values,
-                     self.predictive_samples_mean(future)['yhat'],
-                     label="Reference model",
-                     ls='-')
-        pred_ax.legend()
-        pred_ax.set_ylabel('y')
-        pred_ax.set_xlabel('ds')
-        pred_ax.set_xlim([pd.to_datetime('2017-03-01'), future['ds'].tail(1)])
-        return statistics_table
+            submodels[len(var_list)] = {
+                'projections': projections,
+                'prediction_df': proj_prediction,
+                'statistics':  statistics
+            }
+
+        return submodels
 
     def init_submodel(self, regressors):
         proj = Prophet(changepoint_prior_scale=self.changepoint_prior_scale,
@@ -122,23 +111,25 @@ class ReferenceModel(Prophet):
         draw_indices = thinning(ndraws, self.uncertainty_samples)
         if ndraws > 1:
             ref_pred_draws = self.predictive_samples(future)
-            yhat = ref_pred_draws['yhat'].iloc[:, draw_indices]
+            ref_yhat = ref_pred_draws['yhat'].iloc[:, draw_indices]
             y = np.broadcast_to(
                 future['y'].values.reshape((len(future['y']), 1)),
-                yhat.shape
+                ref_yhat.shape
             )
-            sigma_obs = ref_pred_draws['sigma_obs'].iloc[:, draw_indices].values
+            sigma_obs = ref_pred_draws['sigma_obs'].iloc[
+                        :, draw_indices].values
         else:
             ref_pred_draws = self.predictive_samples_mean(future)
-            yhat = ref_pred_draws['yhat'].iloc[:, 0:ndraws]
+            ref_yhat = ref_pred_draws['yhat'].iloc[:, 0:ndraws]
             sigma_obs = self.stan_fit.extract()['sigma_obs'][0:ndraws]
             y = future['y'].values
 
         # Project by fitting the submodel to reference model predictions
-        projections = {'yhat': pd.DataFrame(index=future.index)}
-        for i in range(len(yhat.columns.values)):
+        projections = {'yhat': pd.DataFrame(index=future.index),
+                       'trend': pd.DataFrame(index=future.index)}
+        for i in range(len(ref_yhat.columns.values)):
             # Replace original data with reference model projections
-            y_sub = yhat.iloc[:, i]
+            y_sub = ref_yhat.iloc[:, i]
             submodel_train = train.copy()
             submodel_train['y'] = y_sub
 
@@ -146,27 +137,37 @@ class ReferenceModel(Prophet):
             submodel = self.init_submodel(regressors)
             submodel.fit(submodel_train, iter=iter)
 
-            projection = submodel.predict(future).loc[:, ['yhat']]\
-                .rename(columns={'yhat': i})
+            projection = submodel.predict(future)
+            yhat = projection.loc[:, ['yhat']].rename(columns={'yhat': i})
+            trend = projection.loc[:, ['trend']].rename(columns={'trend': i})
             projections['yhat'] = pd.concat(
-                [projections['yhat'], projection], ignore_index=True, axis=1)
+                [projections['yhat'], yhat], ignore_index=True, axis=1)
+            projections['trend'] = pd.concat(
+                [projections['trend'], trend], ignore_index=True, axis=1)
 
         dis = self.family.dispersion(
-            yhat.values, sigma_obs, projections['yhat'].values)
-        dis = np.broadcast_to(dis, yhat.shape)
+            ref_yhat.values, sigma_obs, projections['yhat'].values)
+        dis = np.broadcast_to(dis, ref_yhat.shape)
         projections['sigma_obs'] = pd.DataFrame(data=dis, index=future.index)
 
         # Calculate projection statistics
         test_indices = future.index.values > self.history.index.max()
+        train_indices = future.index.values <= self.history.index.max()
         loglik = self.family.loglik(y, projections['yhat'],
                                     projections['sigma_obs'])
 
-        statistics = {'kl': self.family.kl(yhat.values,
+        statistics = {'kl': self.family.kl(ref_yhat.values,
                                            projections['yhat'].values),
-                      'elpd': stats.elpd(loglik, test_indices=test_indices),
+                      'elpd': stats.elpd(loglik, indices=train_indices),
+                      'elpd_se': stats.elpd_se(loglik, indices=train_indices),
+                      'elpd_test': stats.elpd(loglik,
+                                              indices=test_indices),
+                      'elpd_test_se': stats.elpd_se(loglik,
+                                                    indices=test_indices),
                       'mape': stats.mape(y, projections['yhat'].values,
-                                         test_indices=test_indices)}
-
+                                         indices=train_indices),
+                      'mape_test': stats.mape(y, projections['yhat'].values,
+                                              indices=test_indices)}
         return projections, statistics
 
     def predictive_samples(self, df):
@@ -177,8 +178,10 @@ class ReferenceModel(Prophet):
         return output
 
     def predictive_samples_mean(self, future):
-        prediction = self.predict(future).loc[:, ['yhat']]
-        return {'yhat': prediction}
+        prediction = self.predict(future)
+        yhat = prediction.loc[:, ['yhat']]
+        trend = prediction.loc[:, ['trend']]
+        return {'yhat': yhat, 'trend': trend}
 
     def sample_model(self, df, seasonal_features, iteration, s_a, s_m):
         """Generate predictive samples from posterior draws.

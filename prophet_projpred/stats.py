@@ -1,35 +1,54 @@
 import numpy as np
 
 
-def elpd(loglik: np.array, weights=1, test_indices=None):
+def lppd(loglik, weights=1):
+    w = loglik + np.log(weights)
+    max_w = np.amax(loglik)
+    result = max_w + np.log(np.sum(np.exp(w - max_w), axis=1))
+    return result
+
+
+def elpd(loglik, weights=1, indices=None):
     """Calculates the elpd score, given log likelihood matrix and weights.
     Let N be the number of data points and S the number of draws
 
     :param loglik: NxS matrix
     :param weights:
-    :param test_indices: array(bool) Nx1
+    :param indices: array(bool) Nx1
     :return:
     """
-    w = loglik + np.log(weights)
-    max_w = np.amax(loglik)
-    lppd = max_w + np.log(np.sum(np.exp(w-max_w), axis=1))
-    if test_indices is not None:
-        return np.sum(lppd[test_indices])
+    if indices is not None:
+        return np.sum(lppd(loglik, weights)[indices])
     else:
-        return np.sum(lppd)
+        return np.sum(lppd(loglik, weights))
 
 
-def mape(y, predictions, test_indices=None):
+def elpd_se(loglik, weights=1, indices=None):
+    lppd_values = lppd(loglik, weights)
+    if indices is not None:
+        lppd_values = lppd_values[indices]
+    lppd_mean = np.mean(lppd_values)
+    n = len(lppd_values)
+    sd = np.sqrt(
+        np.sum(
+            weights*(lppd_values-lppd_mean)**2/np.sum(weights)
+        )/(n-1)
+    )
+    se = n*sd/np.sqrt(n)
+    return se
+
+
+def mape(y, predictions, indices=None):
     """
 
     :param y:
     :param predictions:
-    :param test_indices:
+    :param indices:
     :return:
     """
-    if test_indices is not None:
+    if indices is not None:
         value = np.mean(
-            np.mean(np.abs((y - predictions) / y), axis=1)[test_indices]
+            np.mean(np.abs((y - predictions) / y), axis=1)[indices]
         )
     else:
         value = np.mean(np.mean(np.abs((y - predictions) / y), axis=1))
