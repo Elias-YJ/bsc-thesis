@@ -45,6 +45,7 @@ class ReferenceModel(Prophet):
         :param train: pd.DataFrame
         :param future: pd.DataFrame
         :param ndraws_pred: int
+        :param iter: int
         :return:
         """
         submodels = {}
@@ -53,6 +54,8 @@ class ReferenceModel(Prophet):
                 train, future, var_list, ndraws=ndraws_pred, iter=iter)
             yhat = projections['yhat'].mean(axis=1)
             trend = projections['trend'].mean(axis=1)
+            trend_extra = (projections['trend'] +
+                           projections['extra_add']).mean(axis=1)
             sigma = projections['sigma_obs'].loc[0, :].mean()
             yhat_upper, yhat_lower = self.family.interval(
                 yhat, sigma, self.interval_width)
@@ -62,6 +65,7 @@ class ReferenceModel(Prophet):
                       'yhat_upper': yhat_upper,
                       'yhat_lower': yhat_lower,
                       'trend': trend,
+                      'trend_extra': trend_extra,
                       'ds': future['ds'].values},
                 index=future.index
             )
@@ -126,7 +130,8 @@ class ReferenceModel(Prophet):
 
         # Project by fitting the submodel to reference model predictions
         projections = {'yhat': pd.DataFrame(index=future.index),
-                       'trend': pd.DataFrame(index=future.index)}
+                       'trend': pd.DataFrame(index=future.index),
+                       'extra_add': pd.DataFrame(index=future.index)}
         for i in range(len(ref_yhat.columns.values)):
             # Replace original data with reference model projections
             y_sub = ref_yhat.iloc[:, i]
@@ -140,11 +145,24 @@ class ReferenceModel(Prophet):
             projection = submodel.predict(future)
             yhat = projection.loc[:, ['yhat']].rename(columns={'yhat': i})
             trend = projection.loc[:, ['trend']].rename(columns={'trend': i})
+
             projections['yhat'] = pd.concat(
                 [projections['yhat'], yhat], ignore_index=True, axis=1)
             projections['trend'] = pd.concat(
                 [projections['trend'], trend], ignore_index=True, axis=1)
-
+            try:
+                extra_add = projection.loc[:, ['extra_regressors_additive']]. \
+                    rename(columns={'extra_regressors_additive': i})
+                projections['extra_add'] = pd.concat(
+                    [projections['extra_add'], extra_add],
+                    ignore_index=True, axis=1)
+            except KeyError:
+                extra_add = pd.DataFrame(data={
+                    i: np.zeros(len(future.index))
+                }, index=future.index)
+                projections['extra_add'] = pd.concat(
+                    [projections['extra_add'], extra_add],
+                    ignore_index=True, axis=1)
         dis = self.family.dispersion(
             ref_yhat.values, sigma_obs, projections['yhat'].values)
         dis = np.broadcast_to(dis, ref_yhat.shape)
@@ -181,7 +199,12 @@ class ReferenceModel(Prophet):
         prediction = self.predict(future)
         yhat = prediction.loc[:, ['yhat']]
         trend = prediction.loc[:, ['trend']]
-        return {'yhat': yhat, 'trend': trend}
+        try:
+            trend_extra = prediction.loc[:, ['trend']] +\
+                          prediction.loc[:, ['extra_regressors_additive']]
+        except KeyError:
+            trend_extra = prediction.loc[:, ['trend']]
+        return {'yhat': yhat, 'trend': trend, 'trend_extra': trend_extra}
 
     def sample_model(self, df, seasonal_features, iteration, s_a, s_m):
         """Generate predictive samples from posterior draws.

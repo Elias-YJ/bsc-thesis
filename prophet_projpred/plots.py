@@ -20,25 +20,33 @@ def plot_submodels(m, submodels, future):
                      proj_prediction['yhat'],
                      label=size,
                      ls='-')
-    pred_ax.plot(future['ds'].values, future['y'], 'r.', label="Test data")
+
+    test_indices = future.index.values > m.history.index.max()
+    train_indices = future.index.values <= m.history.index.max()
+
+    pred_ax.plot(future.loc[train_indices, 'ds'].values,
+                 future.loc[train_indices, 'y'], 'k.', label="Training data")
+    pred_ax.plot(future.loc[test_indices, 'ds'].values,
+                 future.loc[test_indices, 'y'], 'r*', label="Test data")
     pred_ax.plot(future['ds'].values,
                  m.predictive_samples_mean(future)['yhat'],
                  label="Reference model",
                  ls='--')
     pred_ax.legend()
-    pred_ax.set_ylabel('y')
-    pred_ax.set_xlabel('ds')
+    pred_ax.set_ylabel('log(total sales)')
+    pred_ax.set_xlabel('date')
     pred_ax.set_xlim([pd.to_datetime('2017-03-01'), future['ds'].tail(1)])
     plt.show()
 
 
-def plot_submodel_trends(m, submodels, future):
+def plot_submodel_component(m, submodels, future, component='yhat'):
     """Create a plot for overviewing submodel and model performance over the
     train and test sets.
 
     :param m: ReferenceModel
     :param submodels: dict(projections, prediction_df, statistics)
     :param future: pd.DataFrame
+    :param component: str
     :return:
     """
     pred_fig = plt.figure(facecolor='w', figsize=(14, 6))
@@ -47,16 +55,16 @@ def plot_submodel_trends(m, submodels, future):
     for size, model_dict in submodels.items():
         proj_prediction = model_dict['prediction_df']
         pred_ax.plot(proj_prediction['ds'].values,
-                     proj_prediction['trend'],
+                     proj_prediction[component],
                      label=size,
                      ls='-')
     pred_ax.plot(future['ds'].values,
-                 m.predictive_samples_mean(future)['trend'],
+                 m.predictive_samples_mean(future)[component],
                  label="Reference model",
                  ls='--')
     pred_ax.legend()
-    pred_ax.set_ylabel('y')
-    pred_ax.set_xlabel('ds')
+    pred_ax.set_ylabel('log(total sales)')
+    pred_ax.set_xlabel('date')
     plt.show()
 
 
@@ -78,4 +86,3 @@ def plot_submodel_statistics(submodels):
         axis.legend(prop={'size': 16})
         axis.set_xlabel('variables')
     plt.show()
-

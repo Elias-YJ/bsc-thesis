@@ -48,8 +48,15 @@ def mape(y, predictions, indices=None):
     """
     if indices is not None:
         value = np.mean(
-            np.mean(np.abs((y - predictions) / y), axis=1)[indices]
+            np.mean(
+                np.abs((np.exp(y) - np.exp(predictions)) / np.exp(y)),
+                axis=1
+            )[indices]
         )
     else:
-        value = np.mean(np.mean(np.abs((y - predictions) / y), axis=1))
+        value = np.mean(
+            np.mean(
+                np.abs((np.exp(y) - np.exp(predictions)) / np.exp(y)),
+                axis=1)
+        )
     return value
