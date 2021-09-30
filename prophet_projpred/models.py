@@ -57,7 +57,7 @@ class ReferenceModel(Prophet):
             trend_extra = (projections['trend'] +
                            projections['extra_add']).mean(axis=1)
             sigma = projections['sigma_obs'].loc[0, :].mean()
-            yhat_upper, yhat_lower = self.family.interval(
+            yhat_lower, yhat_upper = self.family.interval(
                 yhat, sigma, self.interval_width)
 
             proj_prediction = pd.DataFrame(
@@ -80,6 +80,7 @@ class ReferenceModel(Prophet):
 
     def init_submodel(self, regressors):
         proj = Prophet(changepoint_prior_scale=self.changepoint_prior_scale,
+                       changepoint_range=self.changepoint_range,
                        holidays=self.holidays,
                        n_changepoints=self.n_changepoints)
         regressors = [variable for variable in self.variables if
@@ -170,6 +171,10 @@ class ReferenceModel(Prophet):
 
         # Calculate projection statistics
         test_indices = future.index.values > self.history.index.max()
+        test_indices30 = (future.index.values > self.history.index.max()) & (
+                future.index.values + 30 < future.index.max()
+        )
+        test_indices60 = future.index.values > self.history.index.max() + 30
         train_indices = future.index.values <= self.history.index.max()
         loglik = self.family.loglik(y, projections['yhat'],
                                     projections['sigma_obs'])
@@ -178,14 +183,18 @@ class ReferenceModel(Prophet):
                                            projections['yhat'].values),
                       'elpd': stats.elpd(loglik, indices=train_indices),
                       'elpd_se': stats.elpd_se(loglik, indices=train_indices),
-                      'elpd_test': stats.elpd(loglik,
-                                              indices=test_indices),
+                      'elpd_test_30': stats.elpd(loglik,
+                                              indices=test_indices30),
+                      'elpd_test_60': stats.elpd(loglik,
+                                                 indices=test_indices60),
                       'elpd_test_se': stats.elpd_se(loglik,
                                                     indices=test_indices),
                       'mape': stats.mape(y, projections['yhat'].values,
                                          indices=train_indices),
-                      'mape_test': stats.mape(y, projections['yhat'].values,
-                                              indices=test_indices)}
+                      'mape_test_30': stats.mape(y, projections['yhat'].values,
+                                              indices=test_indices30),
+                    'mape_test_60': stats.mape(y, projections['yhat'].values,
+                                   indices=test_indices60)}
         return projections, statistics
 
     def predictive_samples(self, df):
@@ -200,8 +209,8 @@ class ReferenceModel(Prophet):
         yhat = prediction.loc[:, ['yhat']]
         trend = prediction.loc[:, ['trend']]
         try:
-            trend_extra = prediction.loc[:, ['trend']] +\
-                          prediction.loc[:, ['extra_regressors_additive']]
+            trend_extra = prediction.loc[:, 'trend'] +\
+                          prediction.loc[:, 'extra_regressors_additive']
         except KeyError:
             trend_extra = prediction.loc[:, ['trend']]
         return {'yhat': yhat, 'trend': trend, 'trend_extra': trend_extra}
